@@ -1,0 +1,819 @@
+# frontend/app.py
+import os
+import sys
+import time
+import re
+from typing import Optional, Tuple, Dict, Any
+
+import requests
+import pandas as pd
+import streamlit as st
+import pydeck as pdk
+import altair as alt
+import plotly.express as px
+
+# --- DEBUG: show dataset paths being checked (paste after imports) ---
+def _debug_data_paths():
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    candidates = [
+        os.path.join(project_root, "cybersecurity_cases_india_combined.csv"),
+        os.path.join(project_root, "data", "cybersecurity_cases_india_combined.csv"),
+        os.path.join(os.getcwd(), "cybersecurity_cases_india_combined.csv"),
+        os.path.join(os.getcwd(), "data", "cybersecurity_cases_india_combined.csv"),
+    ]
+    # print to console
+    print("DEBUG: project_root =", project_root)
+    for p in candidates:
+        print(f"DEBUG: checking -> {p} ; exists={os.path.exists(p)}")
+    # show in sidebar (if streamlit available)
+    try:
+        st.sidebar.markdown("**DEBUG: data path checks**")
+        for p in candidates:
+            st.sidebar.text(f"{p} -> {'FOUND' if os.path.exists(p) else 'MISSING'}")
+    except Exception:
+        pass
+
+# run debug check once at startup
+_debug_data_paths()
+# --- end debug snippet ---
+
+
+# ---------------------------
+# Local dataset loader
+# ---------------------------
+def load_preferred_local_dataset() -> pd.DataFrame:
+    """
+    Load the preferred local CSV: cybersecurity_cases_india_combined.csv
+    Expected input columns (any capitalization): Year, Day, Amount_Lost_INR, Incident_Type, City, Category
+    Converts to canonical frontend columns: id, timestamp, title, description, category, location, amount_lost
+    """
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    candidates = [
+        os.path.join(project_root, "cybersecurity_cases_india_combined.csv"),
+        os.path.join(project_root, "data", "cybersecurity_cases_india_combined.csv"),
+    ]
+    path = None
+    for p in candidates:
+        if os.path.exists(p):
+            path = p
+            break
+    if not path:
+        return pd.DataFrame()
+
+    try:
+        df = pd.read_csv(path, low_memory=False)
+    except Exception:
+        return pd.DataFrame()
+
+    # normalise column names (case-insens & whitespace)
+    cols_map = {c.strip().lower(): c for c in df.columns}
+    def find(cands):
+        for cand in cands:
+            k = cand.strip().lower()
+            if k in cols_map:
+                return cols_map[k]
+        return None
+
+    year_col = find(["year"])
+    day_col = find(["day"])
+    amt_col = find(["amount_lost_inr", "amount_lost", "amount"])
+    type_col = find(["incident_type", "incident", "type"])
+    city_col = find(["city", "location", "place"])
+    cat_col = find(["category"])
+
+    df = df.copy()
+
+    # build timestamp from Year + Day (two strategies)
+    ts = None
+    if year_col and day_col and year_col in df.columns and day_col in df.columns:
+        try:
+            # if day looks numeric (day-of-year)
+            if df[day_col].astype(str).str.match(r'^\s*\d+\s*$').all():
+                yrs = pd.to_numeric(df[year_col], errors="coerce").fillna(1970).astype(int)
+                days = pd.to_numeric(df[day_col], errors="coerce").fillna(1).astype(int)
+                ts = pd.to_datetime(yrs.astype(str), format="%Y", errors="coerce") + pd.to_timedelta(days - 1, unit="D")
+            else:
+                # parse rows individually, append year if needed
+                def parse_row(r):
+                    try:
+                        d = str(r[day_col]).strip()
+                        y = str(int(r[year_col])) if pd.notnull(r[year_col]) else ""
+                        parsed = pd.to_datetime(d, errors="coerce")
+                        if pd.isna(parsed) and y:
+                            parsed = pd.to_datetime(f"{d} {y}", errors="coerce")
+                        return parsed
+                    except Exception:
+                        return pd.NaT
+                ts = pd.to_datetime(df.apply(parse_row, axis=1), errors="coerce")
+        except Exception:
+            ts = None
+
+    # fallback: try common date columns
+    if ts is None or (hasattr(ts, "isnull") and ts.isnull().all()):
+        for candidate in ["date", "timestamp", "reported_on", "datetime"]:
+            c = find([candidate])
+            if c and c in df.columns:
+                try:
+                    ts = pd.to_datetime(df[c], errors="coerce")
+                    break
+                except Exception:
+                    pass
+
+    df["timestamp"] = ts if ts is not None else pd.NaT
+
+    # category/location/title/amount
+    if cat_col and cat_col in df.columns:
+        df["category"] = df[cat_col].astype(str)
+    elif type_col and type_col in df.columns:
+        df["category"] = df[type_col].astype(str)
+    else:
+        df["category"] = ""
+
+    if city_col and city_col in df.columns:
+        df["location"] = df[city_col].astype(str)
+    else:
+        df["location"] = ""
+
+    if type_col and type_col in df.columns:
+        df["title"] = df[type_col].astype(str)
+    else:
+        df["title"] = df["category"].astype(str)
+
+    if amt_col and amt_col in df.columns:
+        df["amount_lost"] = pd.to_numeric(df[amt_col].astype(str).str.replace(r"[^\d\.-]", "", regex=True), errors="coerce").fillna(0.0)
+    else:
+        df["amount_lost"] = 0.0
+
+    df["id"] = df.index.astype(str)
+
+    # trim strings
+    for c in df.select_dtypes(include=["object"]).columns:
+        df[c] = df[c].astype(str).str.strip()
+
+    # ensure canonical columns exist
+    cols_keep = ["id", "timestamp", "title", "category", "location", "amount_lost"]
+    for c in cols_keep:
+        if c not in df.columns:
+            df[c] = "" if c != "timestamp" else pd.NaT
+
+    # reorder
+    canonical = cols_keep
+    cols = [c for c in canonical if c in df.columns] + [c for c in df.columns if c not in canonical]
+    return df[cols]
+
+# ---------------------------
+# Try to load environment variables from .env
+# ---------------------------
+try:
+    from dotenv import load_dotenv
+    env_paths = [
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
+        os.path.join(os.path.dirname(__file__), ".env"),
+    ]
+    for path in env_paths:
+        if os.path.exists(path):
+            load_dotenv(path)
+            break
+except Exception:
+    pass
+
+# ---------------------------
+# Data normalization helpers
+# ---------------------------
+_CANONICAL_MAP = {
+    "category": ["category", "cat", "incident_type", "type", "attack_type", "crime_type"],
+    "location": ["location", "place", "city", "state", "district", "area", "location_name"],
+    "title": ["title", "incident", "headline", "name"],
+    "description": ["description", "desc", "details", "summary"],
+    "timestamp": ["timestamp", "date", "incident_date", "reported_on", "datetime"],
+    "date": ["date", "incident_date", "reported_on", "datetime"],
+    "lat": ["lat", "latitude"],
+    "lon": ["lon", "longitude", "long"],
+    "source": ["source", "reported_by", "reporter"],
+    "severity": ["severity", "level"],
+    "status": ["status"],
+    "id": ["id", "incident_id", "uid"],
+}
+
+def _norm_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s).strip().lower())
+
+def find_best_col(cols, candidates):
+    cols_map = {c.strip().lower(): c for c in cols}
+    for cand in candidates:
+        key = cand.strip().lower()
+        if key in cols_map:
+            return cols_map[key]
+    norm_map = {_norm_key(c): c for c in cols}
+    for cand in candidates:
+        nk = _norm_key(cand)
+        if nk in norm_map:
+            return norm_map[nk]
+    return None
+
+
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    \"\"\"
+    Robust normalization:
+      - Renames known alternate columns to canonical names
+      - Ensures canonical columns exist
+      - Safely parses 'coordinates' into lat/lon if present
+      - Trims string columns in a fail-safe manner (avoids .str on unexpected objects)
+      - Ensures 'id' exists and converts timestamp column to datetime when possible
+    \"\"\"
+    if df is None:
+        return pd.DataFrame()
+    # Work on a copy
+    df = df.copy()
+    cols = list(df.columns)
+
+    # build rename map using provided _CANONICAL_MAP and find_best_col
+    rename_map = {}
+    for canonical, alts in _CANONICAL_MAP.items():
+        try:
+            found = find_best_col(cols, alts)
+        except Exception:
+            found = None
+        if found and found != canonical:
+            rename_map[found] = canonical
+
+    if rename_map:
+        df = df.rename(columns=rename_map)
+        cols = list(df.columns)
+
+    # ensure canonical columns exist
+    for canonical in _CANONICAL_MAP.keys():
+        if canonical not in df.columns:
+            df[canonical] = None if canonical in (\"lat\", \"lon\") else \"\"
+
+    # Some CSVs have combined coords
+    if ((\"lat\" not in df.columns or df[\"lat\"].isnull().all()) and \"coordinates\" in cols):
+        try:
+            coords = df[\"coordinates\"].astype(str).str.replace(\";\", \",\")
+            latlon = coords.str.split(\",\", n=1, expand=True)
+            if latlon.shape[1] == 2:
+                df[\"lat\"] = pd.to_numeric(latlon[0], errors=\"coerce\")
+                df[\"lon\"] = pd.to_numeric(latlon[1], errors=\"coerce\")
+        except Exception:
+            pass
+
+    # Robust trimming/conversion for each column (avoid .str on DataFrame-like or unexpected objects)
+    for c in list(df.columns):
+        try:
+            series = df[c]
+            if hasattr(series, 'astype'):
+                if pd.api.types.is_object_dtype(series) or str(series.dtype).startswith('string'):
+                    df[c] = series.astype(str).str.strip()
+                else:
+                    df[c] = series
+            else:
+                df[c] = series.apply(lambda x: str(x).strip() if pd.notnull(x) else "")
+        except Exception:
+            try:
+                df[c] = df[c].apply(lambda x: str(x).strip() if pd.notnull(x) else "")
+            except Exception:
+                pass
+
+    # ensure id exists
+    if \"id\" not in df.columns or df[\"id\"].isnull().all():
+        df[\"id\"] = df.index.astype(str)
+
+    # convert timestamp safely
+    if \"timestamp\" in df.columns:
+        try:
+            df[\"timestamp\"] = pd.to_datetime(df[\"timestamp\"], errors=\"coerce\")
+        except Exception:
+            pass
+
+    return df
+# ---------------------------
+# API URL logic
+# ---------------------------
+def get_api_url() -> str:
+    env_url = os.getenv("API_URL")
+    if env_url:
+        if "api:" in env_url and not (os.path.exists("/.dockerenv") or os.path.exists("/proc/self/cgroup")):
+            return env_url.replace("api:", "http://localhost:")
+        if env_url.startswith("http://") or env_url.startswith("https://"):
+            return env_url
+        return f"http://{env_url}"
+    return "http://localhost:8000"
+
+API_URL = get_api_url()
+
+# ---------------------------
+# Safe rerun helper (modern API)
+# ---------------------------
+def safe_rerun():
+    """
+    Robust safe rerun that works across Streamlit versions.
+    Tries st.rerun() then falls back to st.query_params setter, then st.stop().
+    """
+    try:
+        if hasattr(st, "rerun"):
+            try:
+                st.rerun()
+                return
+            except Exception:
+                pass
+        try:
+            qp = dict(st.query_params)
+            qp["_rerun"] = str(int(time.time() * 1000))
+            st.query_params = qp
+            st.stop()
+            return
+        except Exception:
+            pass
+        try:
+            st.stop()
+        except Exception:
+            pass
+    except Exception:
+        try:
+            st.stop()
+        except Exception:
+            pass
+
+# ---------------------------
+# Data fetching (tries backend -> fallback to local CSV)
+# ---------------------------
+@st.cache_data(ttl=30)
+def fetch_incidents(params: Dict[str, Any]) -> pd.DataFrame:
+    try:
+        resp = requests.get(f"{API_URL}/api/incidents/", params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            if "incidents" in data and isinstance(data["incidents"], list):
+                records = data["incidents"]
+            elif "data" in data and isinstance(data["data"], list):
+                records = data["data"]
+            else:
+                records = []
+        elif isinstance(data, list):
+            records = data
+        else:
+            records = []
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df = normalize_df(df)
+        if "api_error" in st.session_state:
+            del st.session_state["api_error"]
+        return df
+    except requests.exceptions.ConnectionError:
+        st.session_state["api_error"] = f"Unable to connect to backend API at {API_URL}. Please ensure the backend is running."
+        return pd.DataFrame()
+    except requests.exceptions.Timeout:
+        st.session_state["api_error"] = f"Request to backend API timed out. The backend may be slow or unavailable."
+        return pd.DataFrame()
+    except requests.exceptions.HTTPError as e:
+        st.session_state["api_error"] = f"Backend API returned error: {e.response.status_code} - {e.response.text}"
+        return pd.DataFrame()
+    except Exception as e:
+        st.session_state["api_error"] = f"Error fetching incidents: {str(e)}"
+        return pd.DataFrame()
+
+# ---------------------------
+# Sidebar filters / helpers
+# ---------------------------
+def sidebar_filters() -> dict:
+    st.sidebar.header("Filters")
+    category = st.sidebar.selectbox("Category", ["", "phishing", "ransomware", "data_leak", "defacement", "ddos"], index=0)
+    severity = st.sidebar.selectbox("Severity", ["", "Low", "Medium", "High", "Critical"], index=0)
+    status = st.sidebar.selectbox("Status", ["", "Active", "Resolved"], index=0)
+    st.sidebar.caption("Smart Filters")
+    st.session_state.setdefault("filter_locations", [])
+    st.session_state.setdefault("filter_sources", [])
+    loc_selected = st.sidebar.multiselect("Locations", options=st.session_state.get("locations_options", []), default=st.session_state.get("filter_locations", []))
+    src_selected = st.sidebar.multiselect("Sources", options=st.session_state.get("sources_options", []), default=st.session_state.get("filter_sources", []))
+    st.session_state["filter_locations"] = loc_selected
+    st.session_state["filter_sources"] = src_selected
+    params: dict = {}
+    if category:
+        params["category"] = category
+    if severity:
+        params["severity"] = severity
+    if status:
+        params["status"] = status
+    return params
+
+# ---------------------------
+# Rendering helpers
+# ---------------------------
+def render_summary(df: pd.DataFrame) -> None:
+    c1, c2, c3, c4, c5 = st.columns(5)
+    def count(cat: str) -> int:
+        if df.empty or "category" not in df.columns:
+            return 0
+        try:
+            return int((df["category"].astype(str).str.lower() == str(cat).lower()).sum())
+        except Exception:
+            return 0
+    def stat_card(col, title, value, icon):
+        with col:
+            st.markdown(
+                "<div class='cs-card' style='border-radius:12px;'>"
+                f"<div style='display:flex;align-items:center;gap:8px'><span style='font-size:20px'>{icon}</span><b>{title}</b></div>"
+                f"<div style='font-size:28px;margin-top:6px'>{value}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+    stat_card(c1, "Phishing", count("phishing"), "🎣")
+    stat_card(c2, "Ransomware", count("ransomware"), "🔒")
+    stat_card(c3, "Data Leak", count("data_leak"), "💾")
+    stat_card(c4, "Defacement", count("defacement"), "🖥️")
+    stat_card(c5, "DDoS", count("ddos"), "🛡️")
+
+def render_table(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.info("No incidents found for selected filters.")
+        return
+    show_cols = ["title", "category", "severity", "location", "source", "timestamp", "status"]
+    existing = [c for c in show_cols if c in df.columns]
+    df_sorted = df.sort_values(by="timestamp", ascending=False) if "timestamp" in df.columns else df
+    selected_title = st.selectbox("Select an incident for actions/report:", ["-"] + df_sorted.get("title", pd.Series([])).tolist())
+    if selected_title != "-":
+        sel = df_sorted[df_sorted["title"] == selected_title].head(1)
+        if not sel.empty:
+            row = sel.iloc[0]
+            cols = st.columns(2)
+            with cols[0]:
+                if row.get("status") == "Active" and st.button("Resolve", key=f"resolve_{row.get('id', row.name)}"):
+                    st.success("Marked as resolved (demo mode)")
+            with cols[1]:
+                if st.button("Investigate", key=f"investigate_{row.get('id', row.name)}"):
+                    st.info("Opening investigation workflow (demo mode)")
+            st.markdown("<div class='cs-card' style='margin-top:8px;border-radius:12px'>", unsafe_allow_html=True)
+            st.markdown("<b>Incident Report</b>")
+            st.write({
+                "Summary": row.get("description", "Detailed narrative not available in demo."),
+                "Artifacts": ["ip:203.0.113.5", "hash:abcd1234...", "domain:mal.example"],
+                "Timeline": [
+                    "T-30m: Anomaly detected", "T-20m: Alert triaged", "T-10m: Containment initiated", "T-0: Status updated"
+                ],
+            })
+            st.markdown("</div>", unsafe_allow_html=True)
+    st.dataframe(df_sorted[existing], use_container_width=True, hide_index=True)
+
+_CITY_COORDS = {
+    "mumbai": (19.0760, 72.8777),
+    "delhi": (28.6139, 77.2090),
+    "new delhi": (28.6139, 77.2090),
+    "bengaluru": (12.9716, 77.5946),
+    "bangalore": (12.9716, 77.5946),
+    "hyderabad": (17.3850, 78.4867),
+    "pune": (18.5204, 73.8567),
+    "kolkata": (22.5726, 88.3639),
+    "chennai": (13.0827, 80.2707),
+    "lucknow": (26.8467, 80.9462),
+    "ahmedabad": (23.0225, 72.5714),
+    "jaipur": (26.9124, 75.7873),
+    "surat": (21.1702, 72.8311),
+    "noida": (28.5355, 77.3910),
+    "gurugram": (28.4595, 77.0266),
+    "gurgaon": (28.4595, 77.0266),
+    "coimbatore": (11.0168, 76.9558),
+    "kochi": (9.9312, 76.2673),
+}
+
+def to_lat_lon(loc: str) -> Tuple[Optional[float], Optional[float]]:
+    if not isinstance(loc, str) or not loc.strip():
+        return None, None
+    token = loc.split(",")[0].strip().lower()
+    return _CITY_COORDS.get(token, (None, None))
+
+def geocode_india_locations(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "location" not in df.columns:
+        return pd.DataFrame()
+    df = df.copy()
+    try:
+        latlon = df["location"].astype(str).apply(lambda s: to_lat_lon(s))
+        df["lat"] = latlon.apply(lambda t: t[0])
+        df["lon"] = latlon.apply(lambda t: t[1])
+    except Exception:
+        df["lat"] = None
+        df["lon"] = None
+    if df["lat"].isnull().all() or df["lon"].isnull().all():
+        return pd.DataFrame()
+    return df.dropna(subset=["lat", "lon"])
+
+def render_map(df: pd.DataFrame, selected_id: Optional[str] = None) -> None:
+    st.subheader("Live Threat Map")
+    geo = geocode_india_locations(df)
+    if geo.empty:
+        st.info("No mappable incidents yet. Add incidents with a known Indian city in 'location'.")
+        return
+    severity_to_radius = {"Low": 40000, "Medium": 60000, "High": 90000, "Critical": 120000}
+    severity_to_color = {
+        "Low": [255, 230, 0, 160],
+        "Medium": [255, 165, 0, 180],
+        "High": [255, 99, 71, 200],
+        "Critical": [255, 0, 0, 220],
+    }
+    def radius(row):
+        return severity_to_radius.get(str(row.get("severity", "")).title(), 50000)
+    def color(row):
+        return severity_to_color.get(str(row.get("severity", "")).title(), [150, 150, 255, 140])
+    geo = geo.assign(size=geo.apply(radius, axis=1))
+    center_lat, center_lon = 21.1466, 79.0889
+    if selected_id and selected_id in set(geo.get("id", [])):
+        match = geo[geo["id"] == selected_id].iloc[0]
+        center_lat, center_lon = float(match["lat"]), float(match["lon"])
+    view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=6 if selected_id else 4.2)
+    base_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=geo,
+        get_position="[lon, lat]",
+        get_radius="size",
+        get_fill_color=color,
+        pickable=True,
+    )
+    highlight = None
+    if selected_id and "id" in geo.columns:
+        sel = geo[geo["id"] == selected_id]
+        if not sel.empty:
+            highlight = pdk.Layer(
+                "ScatterplotLayer",
+                data=sel.assign(size=120000),
+                get_position="[lon, lat]",
+                get_radius="size",
+                get_fill_color="[255, 0, 102, 220]",
+                pickable=True,
+            )
+    layers = [base_layer] + ([highlight] if highlight else [])
+    tooltip = {
+        "html": "<b>{title}</b><br/>Category: {category}<br/>Severity: {severity}<br/>Location: {location}<br/>Time: {timestamp}",
+        "style": {"color": "white"},
+    }
+    r = pdk.Deck(layers=layers, initial_view_state=view_state, tooltip=tooltip, map_style="mapbox://styles/mapbox/dark-v11")
+    st.pydeck_chart(r, use_container_width=True)
+    with st.expander("Incident details"):
+        cols = ["id", "title", "category", "severity", "status", "location", "source", "timestamp"]
+        existing = [c for c in cols if c in geo.columns]
+        st.dataframe(geo[existing], use_container_width=True, hide_index=True)
+
+def render_category_chart(df: pd.DataFrame) -> None:
+    if df.empty or "category" not in df.columns:
+        st.info("No data for category chart.")
+        return
+    count_df = df.groupby("category").size().reset_index(name="count")
+    fig = px.pie(count_df, names="category", values="count", hole=0.35)
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="#0B1221", font_color="#FFFFFF")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+def apply_global_style() -> None:
+    st.markdown(
+        """
+        <style>
+            :root { --bg: #0B1221; --accent: #A855F7; --fg: #FFFFFF; }
+            .stApp { background-color: var(--bg); color: var(--fg); }
+            .main .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+            .cs-button { background: var(--accent); color: #fff; padding: 0.6rem 1rem; border-radius: 10px; border: none; transition: transform .15s ease, box-shadow .15s ease; }
+            .cs-button:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(168,85,247,.25); }
+            .cs-card { background: #111a33; border: 1px solid #1e2a4a; padding: 1rem; border-radius: 14px; transition: transform .15s ease, border-color .15s ease; }
+            .cs-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+            .cs-hero-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.5rem; }
+            .cs-hero-sub { color: #cbd5e1; }
+            .cs-feature-title { font-weight: 700; }
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+            html, body, [class*="css"] { font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', sans-serif; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_home(df: pd.DataFrame) -> None:
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        logo_path = os.path.join(os.path.dirname(__file__), "logo.svg")
+        if os.path.exists(logo_path):
+            st.image(logo_path, width=38)
+        st.markdown("<div style='font-weight:800;font-size:20px; display:inline-block; margin-left:8px;'>CyberSentinel</div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown("<div style='text-align:right'><button class='cs-button'>Log In</button></div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='cs-hero-title'>India’s Real-Time Cyber Threat Intelligence</div>", unsafe_allow_html=True)
+    st.markdown("<div class='cs-hero-sub'>CyberSentinel centralizes incident data, offering live monitoring and ML-driven classification to protect India’s digital frontier.</div>", unsafe_allow_html=True)
+
+    b1, b2 = st.columns([1, 1])
+    with b1:
+        if st.button("View Live Dashboard", use_container_width=True):
+            st.session_state["page_override"] = "Dashboard"
+            safe_rerun()
+    with b2:
+        if st.button("Sign Up for Free", use_container_width=True):
+            st.session_state["show_signup"] = True
+
+    if st.session_state.get("show_signup"):
+        with st.form("signup_form"):
+            st.subheader("Create your account")
+            name = st.text_input("Name")
+            email = st.text_input("Email")
+            pwd = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign Up")
+            if submitted:
+                st.success(f"Welcome, {name or 'User'}! This is a placeholder sign-up.")
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.subheader("A Unified Command Center")
+    st.caption("All the tools you need to monitor, classify, and respond to cyber threats.")
+    icons = ["🌐", "🤖", "📡", "⚡", "🔐", "📈"]
+    titles = [
+        "Real-time Incident Mapping",
+        "ML-Powered Classification",
+        "Live Incident Feed",
+        "Instant Alert System",
+        "Secure by Design",
+        "Admin Analytics",
+    ]
+    cols = st.columns(3)
+    for i, title in enumerate(titles):
+        with cols[i % 3]:
+            st.markdown(f"<div class='cs-card'><div style='font-size:28px'>{icons[i]}</div><div class='cs-feature-title'>{title}</div><div style='color:#cbd5e1'>Production-style component placeholder</div></div>", unsafe_allow_html=True)
+
+def main() -> None:
+    st.set_page_config(page_title="CyberSentinel", layout="wide", page_icon="🛡️")
+    apply_global_style()
+    st.sidebar.title("CyberSentinel")
+    page_options = ["Home", "Dashboard", "Incidents", "Admin", "Profile"]
+    default_page = st.session_state.get("page_override", "Home")
+    try:
+        page_index = page_options.index(default_page)
+    except ValueError:
+        page_index = 0
+    page = st.sidebar.radio("Navigation", page_options, index=page_index)
+    st.session_state.pop("page_override", None)
+
+    params = sidebar_filters()
+    auto_refresh = st.sidebar.checkbox("Auto-refresh (10s)", value=True)
+    if auto_refresh:
+        try:
+            qp = dict(st.query_params)
+            qp["_"] = int(time.time() // 10)
+            st.query_params = qp
+        except Exception:
+            pass
+
+    # try backend first
+    df = load_preferred_local_dataset()  # FORCED LOCAL (dev)
+
+    # always prepare local fallback
+    local_df = load_preferred_local_dataset()
+
+    # show API error in sidebar if any
+    if st.session_state.get("api_error"):
+        with st.sidebar:
+            st.error("⚠️ Backend Offline")
+            st.caption(f"API: {API_URL}")
+
+    # if backend returned nothing, fallback to local CSV
+    if df.empty:
+        if not local_df.empty:
+            df = local_df
+            with st.sidebar:
+                st.info(f"Using local dataset ({len(df)} rows) because backend is unavailable.")
+        else:
+            # keep df empty; UI will show guidance
+            df = pd.DataFrame()
+            if st.session_state.get("api_error"):
+                st.error(f"❌ Backend API unavailable at `{API_URL}` and no local dataset found. Please start the backend server.")
+
+    # normalize dataframe to canonical columns
+    if not df.empty:
+        df = normalize_df(df)
+
+    # routing
+    if page == "Home":
+        render_home(df)
+    elif page == "Dashboard":
+        st.title("Dashboard")
+        if not df.empty:
+            st.session_state["locations_options"] = sorted(df["location"].dropna().astype(str).unique().tolist()) if "location" in df.columns else []
+            st.session_state["sources_options"] = sorted(df["source"].dropna().astype(str).unique().tolist()) if "source" in df.columns else []
+            locs = set(st.session_state.get("filter_locations", []))
+            srcs = set(st.session_state.get("filter_sources", []))
+            if locs:
+                df = df[df["location"].astype(str).isin(locs)]
+            if srcs:
+                df = df[df["source"].astype(str).isin(srcs)]
+        render_summary(df)
+        col1, col2 = st.columns((2, 1))
+        with col1:
+            render_map(df)
+        with col2:
+            st.subheader("Incident Categories")
+            render_category_chart(df)
+        st.subheader("Recent Incidents")
+        render_table(df)
+    elif page == "Incidents":
+        st.title("All Incidents")
+        incident_titles = ["-"]
+        if not df.empty and "title" in df.columns:
+            incident_titles.extend(df["title"].dropna().unique().tolist())
+        selected_title = st.selectbox("Jump to incident", incident_titles)
+        selected_id = None
+        if selected_title != "-" and not df.empty:
+            row = df[df["title"] == selected_title].head(1)
+            if not row.empty:
+                selected_id = row.iloc[0].get("id")
+        render_map(df, selected_id=selected_id)
+        render_table(df)
+    elif page == "Admin":
+        st.title("Admin Management")
+        tab1, tab2, tab3, tab4 = st.tabs(["Incident Management", "Analytics", "System Status", "Settings"])
+        with tab1:
+            st.subheader("Incident Management")
+            if not df.empty:
+                st.metric("Total Incidents", len(df))
+                st.metric("Active Incidents", len(df[df.get("status", "") == "Active"]))
+                st.metric("Resolved Incidents", len(df[df.get("status", "") == "Resolved"]))
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("Incidents by Category")
+                    if "category" in df.columns:
+                        category_counts = df["category"].value_counts()
+                        st.bar_chart(category_counts)
+                with col2:
+                    st.subheader("Incidents by Severity")
+                    if "severity" in df.columns:
+                        severity_counts = df["severity"].value_counts()
+                        st.bar_chart(severity_counts)
+                st.subheader("Recent Incidents")
+                render_table(df.head(10))
+            else:
+                st.info("No incidents data available. Connect to backend API or load local dataset.")
+        with tab2:
+            st.subheader("Analytics Dashboard")
+            if not df.empty:
+                st.subheader("Incident Trends")
+                if "timestamp" in df.columns:
+                    df_with_date = df.copy()
+                    df_with_date["date"] = pd.to_datetime(df_with_date["timestamp"]).dt.date
+                    daily_counts = df_with_date.groupby("date").size().reset_index(name="count")
+                    st.line_chart(daily_counts.set_index("date"))
+                st.subheader("Geographic Distribution")
+                if "location" in df.columns:
+                    location_counts = df["location"].value_counts().head(10)
+                    st.bar_chart(location_counts)
+            else:
+                st.info("No data available for analytics.")
+        with tab3:
+            st.subheader("System Status")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                try:
+                    health_resp = requests.get(f"{API_URL}/api/health", timeout=5)
+                    if health_resp.status_code == 200:
+                        st.success("✅ Backend API: Online")
+                    else:
+                        st.error("❌ Backend API: Error")
+                except Exception:
+                    st.error("❌ Backend API: Offline")
+            with col2:
+                try:
+                    test_resp = requests.get(f"{API_URL}/api/incidents/", params={}, timeout=5)
+                    if test_resp.status_code == 200:
+                        st.success("✅ Database: Connected")
+                    else:
+                        st.warning("⚠️ Database: Connection Issues")
+                except Exception:
+                    st.error("❌ Database: Unable to verify")
+            with col3:
+                st.info("ℹ️ Frontend: Running")
+            st.subheader("System Information")
+            st.json(
+                {
+                    "API URL": API_URL,
+                    "Python Version": f"{sys.version.split()[0]}",
+                    "Streamlit Version": st.__version__,
+                }
+            )
+        with tab4:
+            st.subheader("Admin Settings")
+            with st.form("admin_settings"):
+                st.write("Configure system-wide settings")
+                api_url_input = st.text_input("API URL", value=API_URL)
+                auto_refresh_enabled = st.checkbox("Enable Auto-refresh", value=True)
+                refresh_interval = st.slider("Refresh Interval (seconds)", 5, 60, 10)
+                if st.form_submit_button("Save Settings"):
+                    st.session_state["api_url"] = api_url_input
+                    st.session_state["auto_refresh"] = auto_refresh_enabled
+                    st.session_state["refresh_interval"] = refresh_interval
+                    st.success("Settings saved (demo mode - changes not persisted)")
+    else:
+        st.title("My Profile")
+        with st.form("profile_form"):
+            name = st.text_input("Full Name", value=st.session_state.get("prof_name", ""))
+            email = st.text_input("Email", value=st.session_state.get("prof_email", ""))
+            tz = st.selectbox("Timezone", ["IST (UTC+5:30)", "UTC", "CET", "EST"], index=0)
+            st.subheader("Password Management")
+            pwd = st.text_input("New Password", type="password")
+            st.subheader("Notification Preferences")
+            notif_high = st.checkbox("Email me for High/Critical incidents", value=st.session_state.get("notif_high", True))
+            submitted = st.form_submit_button("Update Profile")
+            if submitted:
+                st.session_state.update({"prof_name": name, "prof_email": email, "notif_high": notif_high, "prof_tz": tz})
+                st.success("Profile updated (demo mode)")
+
+if __name__ == "__main__":
+    main()
