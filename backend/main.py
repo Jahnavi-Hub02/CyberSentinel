@@ -4,8 +4,8 @@ from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocket
 import uvicorn
 
-from routers.incidents import router as incidents_router
-from db.mongo import init_mongo, close_mongo
+from backend.routers.incidents import router as incidents_router
+from backend.db.mongo import init_mongo, close_mongo
 
 
 def create_app() -> FastAPI:

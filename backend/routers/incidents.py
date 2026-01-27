@@ -3,8 +3,8 @@ from fastapi import APIRouter, Query
 from datetime import datetime
 import uuid
 
-from models.incident import Incident, IncidentCreate, serialize_db_incident
-from db.mongo import incidents_collection
+from backend.models.incident import Incident, IncidentCreate, serialize_db_incident
+from backend.db.mongo import incidents_collection
 
 
 router = APIRouter()
