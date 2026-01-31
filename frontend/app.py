@@ -8,13 +8,17 @@ from typing import Optional, Tuple, Dict, Any
 import requests
 import pandas as pd
 import streamlit as st
-import pydeck as pdk
+import folium
+from folium.plugins import MarkerCluster
+from streamlit_folium import st_folium
 import altair as alt
 import plotly.express as px
+import hashlib
 
 # ---------------------------
 # Local dataset loader
 # ---------------------------
+@st.cache_data(ttl=300)
 def load_preferred_local_dataset() -> pd.DataFrame:
     """
     Load the preferred local CSV: cybersecurity_cases_india_combined.csv
@@ -298,13 +302,24 @@ def safe_rerun():
     Robust safe rerun that works across Streamlit versions.
     Tries st.rerun() then falls back to st.query_params setter, then st.stop().
     """
+    # Prefer the experimental rerun if available (more stable across versions)
     try:
+        if hasattr(st, "experimental_rerun"):
+            try:
+                st.experimental_rerun()
+                return
+            except Exception:
+                pass
+
+        # Try the standard rerun API
         if hasattr(st, "rerun"):
             try:
                 st.rerun()
                 return
             except Exception:
                 pass
+
+        # Fallback: bump query params to force a refresh, then stop
         try:
             qp = dict(st.query_params)
             qp["_rerun"] = str(int(time.time() * 1000))
@@ -313,6 +328,8 @@ def safe_rerun():
             return
         except Exception:
             pass
+
+        # Final fallback: stop the script (best-effort)
         try:
             st.stop()
         except Exception:
@@ -397,22 +414,32 @@ def render_summary(df: pd.DataFrame) -> None:
         if df.empty:
             return 0
         try:
-            # Use 'category' column (CSV Incident_Type maps to category)
-            # Also check 'title' as fallback since CSV maps Incident_Type to both
-            col_to_use = "category" if "category" in df.columns else ("title" if "title" in df.columns else None)
+            # Check for Incident_Type column (from CSV), fallback to category or title
+            col_to_use = None
+            if "Incident_Type" in df.columns:
+                col_to_use = "Incident_Type"
+            elif "incident_type" in df.columns:
+                col_to_use = "incident_type"
+            elif "category" in df.columns:
+                col_to_use = "category"
+            elif "title" in df.columns:
+                col_to_use = "title"
+            
             if col_to_use is None:
                 return 0
-            # Case-insensitive substring matching (handles "Data Breach", "data breach", etc.)
-            mask = df[col_to_use].astype(str).str.lower().str.contains(incident_type.lower(), na=False, regex=False)
+            
+            # Create a mask for matching (case-insensitive substring matching)
+            def match_incident(val):
+                if pd.isna(val):
+                    return False
+                val_str = str(val).lower().strip()
+                search_str = incident_type.lower().strip()
+                return search_str in val_str
+            
+            mask = df[col_to_use].apply(match_incident)
             return int(mask.sum())
         except Exception:
             return 0
-    
-    def get_total_attacks() -> int:
-        """Get total number of attacks."""
-        if df.empty:
-            return 0
-        return len(df)
     
     def stat_card(col, title, value, icon):
         with col:
@@ -424,13 +451,13 @@ def render_summary(df: pd.DataFrame) -> None:
                 unsafe_allow_html=True,
             )
     
-    # Count actual incident types from CSV (case-insensitive matching)
+    # Count incident types
     phishing_count = count_incident_type("phishing")
     ransomware_count = count_incident_type("ransomware")
     data_breach_count = count_incident_type("data breach") + count_incident_type("data_leak")
     malware_count = count_incident_type("malware")
     hacking_count = count_incident_type("hacking")
-    total_attacks = get_total_attacks()
+    total_attacks = len(df) if not df.empty else 0
     
     stat_card(c1, "Phishing", phishing_count, "🎣")
     stat_card(c2, "Ransomware", ransomware_count, "🔒")
@@ -497,7 +524,12 @@ def to_lat_lon(loc: str) -> Tuple[Optional[float], Optional[float]]:
     token = loc.split(",")[0].strip().lower()
     return _CITY_COORDS.get(token, (None, None))
 
+@st.cache_data(ttl=60)
 def geocode_india_locations(df: pd.DataFrame) -> pd.DataFrame:
+    """Map human-friendly Indian city names to lat/lon.
+
+    Cached to avoid recomputing on each rerun and improve dashboard responsiveness.
+    """
     if df.empty or "location" not in df.columns:
         return pd.DataFrame()
     df = df.copy()
@@ -508,9 +540,26 @@ def geocode_india_locations(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         df["lat"] = None
         df["lon"] = None
-    if df["lat"].isnull().all() or df["lon"].isnull().all():
-        return pd.DataFrame()
-    return df.dropna(subset=["lat", "lon"])
+    # Drop rows without valid numeric coordinates
+    df = df.dropna(subset=["lat", "lon"])
+    # Ensure numeric types
+    try:
+        df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+        df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+    except Exception:
+        pass
+    df = df.dropna(subset=["lat", "lon"])
+    return df
+
+def _deterministic_jitter(uid: str, scale: float = 0.02) -> float:
+    """Deterministic small offset based on an id string to avoid exact overlapping markers."""
+    try:
+        h = int(hashlib.md5(str(uid).encode()).hexdigest()[:8], 16)
+        val = (h % 10000) / 10000.0  # 0..0.9999
+        return (val - 0.5) * scale
+    except Exception:
+        return 0.0
+
 
 def render_map(df: pd.DataFrame, selected_id: Optional[str] = None) -> None:
     st.subheader("Live Threat Map")
@@ -518,60 +567,122 @@ def render_map(df: pd.DataFrame, selected_id: Optional[str] = None) -> None:
     if geo.empty:
         st.info("No mappable incidents yet. Add incidents with a known Indian city in 'location'.")
         return
-    severity_to_radius = {"Low": 40000, "Medium": 60000, "High": 90000, "Critical": 120000}
-    severity_to_color = {
-        "Low": [255, 230, 0, 160],
-        "Medium": [255, 165, 0, 180],
-        "High": [255, 99, 71, 200],
-        "Critical": [255, 0, 0, 220],
-    }
-    def radius(row):
-        return severity_to_radius.get(str(row.get("severity", "")).title(), 50000)
-    def color(row):
-        return severity_to_color.get(str(row.get("severity", "")).title(), [150, 150, 255, 140])
-    geo = geo.assign(size=geo.apply(radius, axis=1))
+
+    # Sidebar control: limit markers to avoid long render times
+    st.sidebar.caption("Map display options")
+    max_markers = st.sidebar.slider("Max map markers", min_value=50, max_value=2000, value=500, step=50)
+
+    # Center map on India by default
     center_lat, center_lon = 21.1466, 79.0889
+    zoom_level = 4
+
+    # If a specific incident is selected, center on it
     if selected_id and selected_id in set(geo.get("id", [])):
         match = geo[geo["id"] == selected_id].iloc[0]
         center_lat, center_lon = float(match["lat"]), float(match["lon"])
-    view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=6 if selected_id else 4.2)
-    base_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=geo,
-        get_position="[lon, lat]",
-        get_radius="size",
-        get_fill_color=color,
-        pickable=True,
+        zoom_level = 8
+
+    # Create Folium map with dark tiles (better match dashboard theme)
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_level,
+        tiles="CartoDB dark_matter",
+        control_scale=True,
     )
-    highlight = None
-    if selected_id and "id" in geo.columns:
-        sel = geo[geo["id"] == selected_id]
-        if not sel.empty:
-            highlight = pdk.Layer(
-                "ScatterplotLayer",
-                data=sel.assign(size=120000),
-                get_position="[lon, lat]",
-                get_radius="size",
-                get_fill_color="[255, 0, 102, 220]",
-                pickable=True,
-            )
-    layers = [base_layer] + ([highlight] if highlight else [])
-    tooltip = {
-        "html": "<b>{title}</b><br/>Category: {category}<br/>Severity: {severity}<br/>Location: {location}<br/>Time: {timestamp}",
-        "style": {"color": "white"},
+
+    # Use a MarkerCluster to improve performance and prevent overlap
+    marker_cluster = MarkerCluster(name="Incidents", disableClusteringAtZoom=10).add_to(m)
+
+    # Severity configuration
+    severity_color = {
+        "Low": "#FFE600",
+        "Medium": "#FFA500",
+        "High": "#FF6347",
+        "Critical": "#FF0000",
     }
-    r = pdk.Deck(layers=layers, initial_view_state=view_state, tooltip=tooltip, map_style="mapbox://styles/mapbox/dark-v11")
-    st.pydeck_chart(r, use_container_width=True)
+
+    severity_radius = {
+        "Low": 8,
+        "Medium": 12,
+        "High": 16,
+        "Critical": 20,
+    }
+
+    # Limit markers for performance
+    to_show = geo.head(max_markers)
+
+    bounds = []
+
+    # Add markers for each incident (clustered)
+    for idx, row in to_show.iterrows():
+        severity = str(row.get("severity", "Medium")).title()
+        color = severity_color.get(severity, "#9999FF")
+        radius = severity_radius.get(severity, 10)
+
+        # Apply a tiny deterministic jitter to avoid overlapping exact coordinates
+        jitter_lat = _deterministic_jitter(row.get("id", idx), scale=0.02)
+        jitter_lon = _deterministic_jitter(f"{row.get('id', idx)}_lon", scale=0.02)
+        lat = float(row["lat"]) + jitter_lat
+        lon = float(row["lon"]) + jitter_lon
+
+        # Build popup (keep compact) and tooltip for quick hover
+        popup_text = f"<div style='font-family: Arial; width: 240px;'>" \
+                    f"<b>{row.get('title', 'Unknown')}</b><br/><small>{row.get('category', 'N/A')}</small><br/>" \
+                    f"<small>{row.get('location', 'N/A')}</small>" \
+                    "</div>"
+        popup = folium.Popup(popup_text, max_width=280)
+        tooltip = str(row.get('title', ''))
+
+        # Use CircleMarker inside the cluster
+        marker = folium.CircleMarker(
+            location=[lat, lon],
+            radius=radius,
+            popup=popup,
+            tooltip=tooltip,
+            color=color,
+            fill=True,
+            fillColor=color,
+            fillOpacity=0.8,
+            weight=1,
+        )
+        marker.add_to(marker_cluster)
+        bounds.append([lat, lon])
+
+    # Fit map to bounds if we have them
+    if bounds:
+        try:
+            m.fit_bounds(bounds, padding=(40, 40))
+        except Exception:
+            pass
+
+    # If dataset is very large, render map in a collapsed expander by default
+    if len(geo) > 1000:
+        with st.expander(f"Live threat map ({len(geo)} incidents) - expand to view (recommended for large datasets)"):
+            st_folium(m, width=None, height=550)
+    else:
+        st_folium(m, width=None, height=550)
+
     with st.expander("Incident details"):
         cols = ["id", "title", "category", "severity", "status", "location", "source", "timestamp"]
         existing = [c for c in cols if c in geo.columns]
-        st.dataframe(geo[existing], use_container_width=True, hide_index=True)
+        # Limit details table for performance
+        st.dataframe(to_show[existing], use_container_width=True, hide_index=True)
+
+@st.cache_data(ttl=60)
+def _category_counts(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "category" not in df.columns:
+        return pd.DataFrame()
+    return df.groupby("category").size().reset_index(name="count")
+
 
 def render_category_chart(df: pd.DataFrame) -> None:
     if df.empty or "category" not in df.columns:
         st.info("No data for category chart.")
         return
-    count_df = df.groupby("category").size().reset_index(name="count")
+    count_df = _category_counts(df)
+    if count_df.empty:
+        st.info("No data for category chart.")
+        return
     fig = px.pie(count_df, names="category", values="count", hole=0.35)
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="#0B1221", font_color="#FFFFFF")
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
@@ -583,6 +694,8 @@ def apply_global_style() -> None:
             :root { --bg: #0B1221; --accent: #A855F7; --fg: #FFFFFF; }
             .stApp { background-color: var(--bg); color: var(--fg); }
             .main .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+
+            /* Buttons and cards */
             .cs-button { background: var(--accent); color: #fff; padding: 0.6rem 1rem; border-radius: 10px; border: none; transition: transform .15s ease, box-shadow .15s ease; }
             .cs-button:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(168,85,247,.25); }
             .cs-card { background: #111a33; border: 1px solid #1e2a4a; padding: 1rem; border-radius: 14px; transition: transform .15s ease, border-color .15s ease; }
@@ -590,6 +703,31 @@ def apply_global_style() -> None:
             .cs-hero-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.5rem; }
             .cs-hero-sub { color: #cbd5e1; }
             .cs-feature-title { font-weight: 700; }
+
+            /* DataFrame and table readability (dark theme) */
+            div[data-testid="stDataFrame"] table, div[data-testid="stTable"] table {
+                background-color: #0b1221 !important;
+                color: #e6eef8 !important;
+            }
+            div[data-testid="stDataFrame"] table th, div[data-testid="stTable"] table th {
+                color: #cbd5e1 !important;
+            }
+            div[data-testid="stDataFrame"] table td, div[data-testid="stTable"] table td {
+                color: #e6eef8 !important;
+            }
+            /* Ensure selection and header borders remain visible */
+            div[data-testid="stDataFrame"] table td, div[data-testid="stDataFrame"] table th {
+                border-color: rgba(255,255,255,0.06) !important;
+            }
+
+            /* Small tweaks to common Streamlit widgets for dark theme */
+            .stMetricValue, .stMetricLabel { color: #e6eef8 !important; }
+            .stButton>button { background-color: var(--accent) !important; color: #fff !important; }
+
+            /* Folium map / iframe styling to blend with dark UI */
+            .folium-map, .leaflet-container { border-radius: 12px; overflow: hidden; }
+            iframe[src*="openstreetmap"], iframe[src*="cartodb"], iframe[src*="tile"] { border-radius: 12px; border: 1px solid rgba(255,255,255,0.04); }
+
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
             html, body, [class*="css"] { font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', sans-serif; }
         </style>
@@ -660,11 +798,21 @@ def main() -> None:
     st.session_state.pop("page_override", None)
 
     params = sidebar_filters()
-    auto_refresh = st.sidebar.checkbox("Auto-refresh (10s)", value=True)
+    auto_refresh = st.sidebar.checkbox("Auto-refresh (60s)", value=False)
+
+    # Manual refresh button (useful when auto-refresh is off)
+    if st.sidebar.button("Refresh now"):
+        try:
+            qp = dict(st.query_params)
+            qp["_"] = int(time.time())
+            st.query_params = qp
+        except Exception:
+            pass
+
     if auto_refresh:
         try:
             qp = dict(st.query_params)
-            qp["_"] = int(time.time() // 10)
+            qp["_"] = int(time.time() // 60)
             st.query_params = qp
         except Exception:
             pass
@@ -740,8 +888,13 @@ def main() -> None:
             st.subheader("Incident Management")
             if not df.empty:
                 st.metric("Total Incidents", len(df))
-                st.metric("Active Incidents", len(df[df.get("status", "") == "Active"]))
-                st.metric("Resolved Incidents", len(df[df.get("status", "") == "Resolved"]))
+                # Count active incidents (those with status "Active" or without explicit "Closed" status)
+                active_count = len(df[df["status"].astype(str).str.lower() == "active"]) if "status" in df.columns else 0
+                # Count resolved/closed incidents
+                resolved_count = len(df[df["status"].astype(str).str.lower().isin(["resolved", "closed"])]) if "status" in df.columns else len(df)
+                
+                st.metric("Active Incidents", active_count)
+                st.metric("Resolved Incidents", resolved_count)
                 col1, col2 = st.columns(2)
                 with col1:
                     st.subheader("Incidents by Category")

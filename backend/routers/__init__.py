@@ -1,1 +1,1 @@
-"""API routers for CyberSentinel"""
+"""API Route Handlers"""

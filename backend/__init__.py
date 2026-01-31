@@ -1,1 +1,1 @@
-"""CyberSentinel Backend Package"""
+"""CyberSentinel Backend API Package"""

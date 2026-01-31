@@ -1,10 +1,12 @@
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 import uuid
 
 
 class Incident(BaseModel):
+    model_config = ConfigDict(extra='allow')  # Allow extra fields from CSV
+    
     id: str = Field(..., description="UUID of the incident")
     title: str
     description: str
@@ -14,6 +16,9 @@ class Incident(BaseModel):
     severity: str
     location: str
     status: str
+    incident_type: Optional[str] = None
+    Incident_Type: Optional[str] = None
+    amount_lost: Optional[float] = None
 
 
 class IncidentCreate(BaseModel):

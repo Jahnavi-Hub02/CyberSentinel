@@ -1,1 +1,1 @@
-"""Data models for CyberSentinel API"""
+"""Data Models"""
