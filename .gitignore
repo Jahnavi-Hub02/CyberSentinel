@@ -30,7 +30,7 @@ pnpm-debug.log*
 
 # VS Code / IDEs
 .vscode/
-!.vscode/tasks.json
+
 .idea/
 
 # OS + misc
