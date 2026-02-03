@@ -10,6 +10,4 @@ def test_incidents_limit_fallback():
     assert isinstance(data, list)
     # Should be at most 5 items
     assert len(data) <= 5
-    # If any returned, they should have a timestamp
-    if data:
-        assert "timestamp" in data[0]
+

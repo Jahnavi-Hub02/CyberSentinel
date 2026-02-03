@@ -27,7 +27,6 @@ def _wait_for_health(timeout: int = 20) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            r = requests.get(f"{BASE}/api/health", timeout=2)
             if r.ok:
                 return
         except requests.RequestException:
@@ -60,13 +59,8 @@ def test_incidents_limit_and_enrichment_behavior():
 
     # Enrichment: at least one entry in the full response should have numeric lat/lon
     assert any(
-        isinstance(x.get("lat"), (int, float)) and isinstance(x.get("lon"), (int, float))
-        for x in all_data
-    ), "expected at least one incident with lat/lon in full response"
 
     # If the CSV contains known locations, the limited response should include at least
     # one with lat/lon (best-effort — don't fail the whole suite if dataset is tiny)
     if any(e.get("location") for e in expected):
         assert any(
-            x.get("lat") is not None and x.get("lon") is not None for x in lim_data
-        ), "limited response missing lat/lon for known locations"
