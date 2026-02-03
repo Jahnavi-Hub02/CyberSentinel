@@ -14,63 +14,10 @@ CyberSentinel ingests incident data (CSV fallback or MongoDB), normalizes it int
 - **Developer-friendly setup** with one-click VS Code task
 - **CI-ready workflow** for automated tests and linting
 
-## Tech Stack
-- **Backend:** FastAPI + Uvicorn
-- **Frontend:** Streamlit + Plotly
-- **Database:** MongoDB (optional) with CSV fallback
-- **Data Processing:** Pandas
-- **CI:** GitHub Actions
-- **Containerization:** Docker
 
 ## Folder Structure
 ```
 CyberSentinel/
-├── backend/                 # FastAPI backend
-│   ├── app.py
-│   ├── data/                # CSV fallback data + cache
-│   ├── db/                  # MongoDB connection helpers
-│   ├── ml/                  # ML detection components
-│   ├── models/              # Pydantic models
-│   ├── routers/             # API routes
-│   ├── tests/               # Backend tests
-│   └── requirements.txt
-├── frontend/                # Streamlit dashboard
-│   ├── app.py
-│   └── logo.svg
-├── scripts/                 # Utility scripts
-│   ├── run_services.py
-│   ├── run_and_open.ps1
-│   └── ingest_csv.py
-├── .github/                 # CI workflows
-├── .vscode/                 # Editor tasks
-├── Dockerfile               # Backend container
-└── README.md
-```
-
-## Prerequisites
-- **Python 3.10+**
-- **pip**
-- (Optional) **MongoDB** for persistent storage
-- (Optional) **Docker** for containerized backend
-
-## Installation
-```bash
-# 1) Create a virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-
-# 2) Install backend dependencies
-pip install -r backend/requirements.txt
-```
-
-## Environment Variables
-| Variable | Description | Default |
-| --- | --- | --- |
-| `API_URL` | Frontend base URL for the backend | `http://localhost:8000` |
-| `BACKEND_URL` | Alternate frontend base URL | (none) |
-| `MONGODB_URI` | MongoDB connection URI | `mongodb://mongo:27017` |
-| `MONGODB_DB` | MongoDB database name | `cybersentinel` |
-| `CORS_ORIGINS` | Comma-separated CORS allowlist | `http://localhost:8501,http://127.0.0.1:8501` |
 
 Create a `.env` file in the repo root if you want to override defaults.
 
@@ -84,59 +31,9 @@ python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload
 
 ## Running the Frontend
 ```bash
-# Streamlit (local dev)
-python -m streamlit run frontend/app.py --server.port 8501 --server.headless true
+
 ```
 
 Open: **http://localhost:8501**
 
-## Running Both Services (Convenience)
-```bash
-python scripts/run_services.py
-```
 
-## API Endpoints
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| GET | `/health` | Service health check (`{ "status": "online" }`) |
-| GET | `/api/health` | Health check alias |
-| GET | `/api/incidents/` | List incidents (supports filters + limit) |
-| POST | `/api/incidents/` | Create incident (MongoDB required) |
-| GET | `/api/insights/top-locations` | Top incident locations |
-| GET | `/api/ml/status` | ML model status |
-| POST | `/api/ml/train` | Train ML model |
-| POST | `/api/ml/detect` | Run detection |
-| GET | `/api/ml/insights` | ML insights summary |
-
-## Dev Workflow
-### VS Code One-Click Task
-A ready-to-run VS Code task starts backend + frontend and opens the dashboard:
-1. Open the repo in VS Code.
-2. Run: **Terminal → Run Task → Dev: Run backend + frontend**.
-
-### CI
-GitHub Actions runs on every push and pull request:
-- Installs dependencies
-- Runs `pytest` if tests are present
-- Runs linting if configured in `pyproject.toml`
-
-## Docker Usage
-Build and run the backend in Docker:
-```bash
-# Build
-docker build -t cybersentinel-backend .
-
-# Run
-docker run -p 8000:8000 --env MONGODB_URI=mongodb://host.docker.internal:27017 cybersentinel-backend
-```
-
-## Contribution Guide
-We welcome contributions! Please follow these steps:
-1. **Fork** the repository.
-2. **Create a feature branch**: `git checkout -b feature/my-change`.
-3. **Run tests**: `python -m pytest -q backend/tests`.
-4. **Commit with a clear message**.
-5. **Open a pull request** describing your change and rationale.
-
-## License
-This project is open source. If you plan to deploy commercially, please review the repository license and comply with its terms.
