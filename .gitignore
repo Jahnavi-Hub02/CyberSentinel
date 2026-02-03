@@ -1,9 +1,42 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Node
 node_modules/
-.env
-*.log
-.DS_Store
-.idea/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# VS Code / IDEs
 .vscode/
+!.vscode/tasks.json
+.idea/
+
+# OS + misc
+.DS_Store
+*.log
+
+# Environment files
+.env
+.env.*

@@ -1,48 +1,30 @@
 from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
-from datetime import datetime
-import uuid
 
 
 class Incident(BaseModel):
-    model_config = ConfigDict(extra='allow')  # Allow extra fields from CSV
-    
-    id: str = Field(..., description="UUID of the incident")
-    title: str
-    description: str
+    """Standardized incident payload returned by the API."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Incident identifier (INC-xxxx)")
+    type: str = Field(..., description="Incident type, e.g. Phishing")
     category: str
-    source: str
-    timestamp: datetime
     severity: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     location: str
-    status: str
-    incident_type: Optional[str] = None
-    Incident_Type: Optional[str] = None
-    amount_lost: Optional[float] = None
+    timestamp: str = Field(..., description="ISO-8601 timestamp in UTC")
 
 
 class IncidentCreate(BaseModel):
-    title: str
-    description: str
+    """Request payload for creating a new incident."""
+
+    type: str
     category: str
-    source: str
-    timestamp: Optional[datetime] = None
     severity: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     location: str
-    status: str = "Active"
-
-
-def serialize_db_incident(doc: dict) -> Incident:
-    return Incident(
-        id=doc.get("id") or str(uuid.uuid4()),
-        title=doc["title"],
-        description=doc["description"],
-        category=doc["category"],
-        source=doc["source"],
-        timestamp=doc["timestamp"],
-        severity=doc["severity"],
-        location=doc["location"],
-        status=doc.get("status", "Active"),
-    )
-
+    timestamp: Optional[str] = None
 
