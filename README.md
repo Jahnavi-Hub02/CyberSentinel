@@ -1,5 +1,6 @@
 # CyberSentinel — Threat Intelligence Platform
 
+
 CyberSentinel is a real-time cybersecurity threat intelligence platform built for rapid incident analysis, visualization, and operational monitoring. It combines a FastAPI backend with a Streamlit dashboard to provide a single pane of glass for security teams. The project is designed to be easy to run locally, straightforward to containerize, and simple to extend.
 
 ## Project Overview
@@ -18,22 +19,12 @@ CyberSentinel ingests incident data (CSV fallback or MongoDB), normalizes it int
 ## Folder Structure
 ```
 CyberSentinel/
+## Contribution Guide
+1. Fork the repository.
+2. Create a feature branch: `git checkout -b feature/my-change`.
+3. Run tests: `python -m pytest -q backend/tests`.
+4. Commit with a clear message.
+5. Open a pull request with context and screenshots where applicable.
 
-Create a `.env` file in the repo root if you want to override defaults.
-
-## Running the Backend
-```bash
-# FastAPI (local dev)
-python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload
-```
-
-**Health check:** `GET http://127.0.0.1:8000/health`
-
-## Running the Frontend
-```bash
-
-```
-
-Open: **http://localhost:8501**
-
-
+## License
+This project is open source. Review the repository license for terms and conditions.

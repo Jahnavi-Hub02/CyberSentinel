@@ -30,6 +30,7 @@ pnpm-debug.log*
 
 # VS Code / IDEs
 .vscode/
+
 .idea/
 
 # OS + misc
