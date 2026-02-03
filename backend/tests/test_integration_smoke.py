@@ -60,7 +60,9 @@ def test_incidents_limit_and_enrichment_behavior():
     # Enrichment: at least one entry in the full response should have numeric lat/lon
     assert any(
 
+
     # If the CSV contains known locations, the limited response should include at least
     # one with lat/lon (best-effort — don't fail the whole suite if dataset is tiny)
     if any(e.get("location") for e in expected):
         assert any(
+
