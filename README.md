@@ -8,13 +8,13 @@ A comprehensive platform for analyzing 1200+ cybersecurity incidents with real-t
 
 ```bash
 # Start both backend and frontend (recommended)
-python app.py
+python scripts/run_services.py
 
 # Or start only backend
-python app.py backend
+python scripts/run_services.py backend
 
 # Or start only frontend
-python app.py frontend
+python scripts/run_services.py frontend
 ```
 
 **Dashboard:** http://localhost:8501  
@@ -49,51 +49,29 @@ CyberSentinel/
 │
 ├── backend/                    # ✅ Production backend only
 │   ├── app.py                  # SINGLE FastAPI entry point
-│   │
+│   ├── data/                   # 📊 Static datasets (CSV fallback + cache)
 │   ├── db/
-│   │   ├── __init__.py
-│   │   └── mongo.py
-│   │
 │   ├── ml/
-│   │   ├── __init__.py
-│   │   ├── features.py
-│   │   ├── model.py
-│   │   ├── detector.py
-│   │   ├── trainer.py
-│   │   └── isolation_forest.pkl
-│   │
 │   ├── models/
-│   │   ├── __init__.py
-│   │   └── incident.py
-│   │
 │   ├── routers/
-│   │   ├── __init__.py
-│   │   ├── incidents.py
-│   │   ├── detection.py
-│   │   └── health.py
-│   │
-│   └── Dockerfile
+│   ├── tests/                  # Backend tests
+│   ├── Dockerfile
+│   └── requirements.txt
 │
 ├── frontend/                   # 🎨 UI only (no ML, no CSV logic)
 │   ├── app.py
 │   ├── logo.svg
 │   └── Dockerfile
 │
-├── data/                       # 📊 Static datasets (never imported directly)
-│   ├── cybersecurity_cases_india_combined.csv
-│   ├── phishing.csv
-│   └── sample_logs.csv
-│
-# Note: Experimental scripts were removed from the root project to avoid accidental runtime imports. Keep experiments in a separate archive or private branch if needed.
-│
 ├── scripts/                    # ⚙️ Run & utility scripts
+│   ├── run_services.py
 │   ├── service_manager.py
 │   ├── ingest_csv.py
 │   └── START_SERVICES.bat
 │
+├── .github/
 ├── .gitignore
-├── README.md
-└── requirements.txt
+└── README.md
 ```
 
 ## 🚀 Quick Start (Windows)
@@ -133,7 +111,7 @@ cd c:\Users\jaanu\OneDrive\Desktop\FINAL PROJECT\CyberSentinel
 
 1. Install dependencies (one-time):
 ```powershell
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 ```
 
 2. Start services (from appropriate directories as shown above)
@@ -142,7 +120,7 @@ Optional: Ingest CSV into MongoDB (recommended for production):
 ```powershell
 python scripts/ingest_csv.py --uri mongodb://localhost:27017 --db cybersentinel --drop
 ```
-This will upsert the `data/cybersecurity_cases_india_combined.csv` into `db.incidents`. If MongoDB is not running the backend will fall back to the local CSV as an emergency read-only fallback.
+This will upsert the `backend/data/cybersecurity_cases_india_combined.csv` into `db.incidents`. If MongoDB is not running the backend will fall back to the local CSV as an emergency read-only fallback.
 
 ## 🗺️ Dashboard Features
 
@@ -175,21 +153,19 @@ This will upsert the `data/cybersecurity_cases_india_combined.csv` into `db.inci
 ## 📋 File Descriptions
 
 ### Backend (`backend/` package)
-- `detector.py` - ML-based threat detection using IsolationForest
-- `database.py` - Incident persistence (MongoDB or JSON)
-- `llm.py` - LLM configuration and API calls
-- `alerts.py` - Telegram/Email notification system
-- `utils.py` - Shared utility functions
-- `dashboard.py` - Analytics dashboard helpers
+- `ml/` - ML-based threat detection using IsolationForest
+- `db/` - MongoDB connection helpers
+- `storage/` - CSV fallback loading helpers
+- `utils/` - Shared utility functions (e.g., geocoding cache)
+- `routers/` - FastAPI routers and endpoints
 
 ### Frontend (`frontend/` package)
-- `app.py` - Main Streamlit dashboard application (939 lines)
+- `app.py` - Main Streamlit dashboard application
 - `.streamlit/config.toml` - Streamlit configuration
-- `requirements.txt` - Frontend-specific dependencies
 
-### Root Application
-- `app.py` - FastAPI backend entrypoint
-- `requirements.txt` - All dependencies including backend and frontend
+### Scripts
+- `scripts/run_services.py` - Starts backend + frontend together
+- `scripts/service_manager.py` - Service manager with status output
 
 ## 🎯 API Endpoints
 
@@ -202,12 +178,12 @@ This will upsert the `data/cybersecurity_cases_india_combined.csv` into `db.inci
 
 ## 📊 Sample Data
 
-CSV file location: `data/cybersecurity_cases_india_combined.csv`
+CSV file location: `backend/data/cybersecurity_cases_india_combined.csv`
 
 Columns: Year, Day, Amount_Lost_INR, Incident_Type, City, Category
 
 ```
-Data in incidents.json:
+Dataset summary:
 - Total Records: 1200
 - Incident Types: 10 types
 - Geographic Coverage: 20+ Indian cities
@@ -229,7 +205,7 @@ Get-Process python,streamlit | Stop-Process -Force
 - Ensure internet connection is active and clear browser cache if needed
 
 **CSV not loading:**
-- Verify `data/cybersecurity_cases_india_combined.csv` exists
+- Verify `backend/data/cybersecurity_cases_india_combined.csv` exists
 - Check file permissions and CSV format
 
 ## 📝 Project Status
@@ -247,18 +223,18 @@ Get-Process python,streamlit | Stop-Process -Force
 For development with auto-reload:
 
 ```powershell
-python app.py
-# or: uvicorn app:app --reload
+python scripts/run_services.py
+# or: uvicorn backend.app:app --reload
 ```
 
 4. Start the Streamlit dashboard (from root, in another terminal):
 
 ```powershell
 # Start both services with a single command (recommended):
-python app.py
+python scripts/run_services.py
 
 # Or start frontend only:
-python app.py frontend
+python scripts/run_services.py frontend
 ```
 
 5. Use the API:
@@ -275,13 +251,13 @@ python app.py frontend
 - **alerts.py** – Telegram and email notifications
 - **utils.py** – Helper functions for log analysis
 
-All backend modules are now in the `backend/` package. Root-level imports (e.g., `from detector import ...`) still work via compatibility shims, so existing code doesn't break.
+All backend modules are contained within the `backend/` package.
 
 ## 🧪 Running Tests
 
 ```powershell
 pip install pytest httpx
-python -m pytest tests/ -v
+python -m pytest backend/tests/ -v
 ```
 
 ## 🤖 Machine Learning Detection System (NEW!)
@@ -298,17 +274,7 @@ CyberSentinel now includes **production-grade ML-based anomaly detection** using
 
 ### Quick Start - ML System
 
-**Step 1: Check ML Status**
-```bash
-python quick_reference.py --status
-```
-
-**Step 2: Train Model (if not trained)**
-```bash
-# See docs/ML_DETECTION_GUIDE.md for demo & API-driven training examples
-```
-
-**Step 3: Use API Endpoints**
+Use the API endpoints below to train and run detection:
 
 Train model:
 ```bash
@@ -373,8 +339,6 @@ API Response + Optional MongoDB Storage
 | `backend/ml/detector.py` | Core detection logic |
 | `backend/ml/trainer.py` | Training pipeline |
 | `backend/routers/detection.py` | 4 FastAPI endpoints |
-| `demo_ml_detection.py` | Live demonstration (archived; see `docs/ML_DETECTION_GUIDE.md`) |
-| `ML_DETECTION_GUIDE.md` | Comprehensive documentation |
 
 ### ML Endpoints
 
@@ -433,7 +397,7 @@ from backend.ml.trainer import train_from_incidents
 import pandas as pd
 
 # Load your incident data
-df = pd.read_csv("data/cybersecurity_cases_india_combined.csv")
+df = pd.read_csv("backend/data/cybersecurity_cases_india_combined.csv")
 incidents = df.to_dict(orient="records")
 
 # Train model
@@ -454,7 +418,7 @@ curl -X POST http://localhost:8000/api/ml/train \
    ```bash
    python -c "from backend.ml.trainer import train_from_incidents; \
    import pandas as pd; \
-   df = pd.read_csv('data/cybersecurity_cases_india_combined.csv'); \
+   df = pd.read_csv('backend/data/cybersecurity_cases_india_combined.csv'); \
    train_from_incidents(df.to_dict(orient='records'))"
    ```
 
@@ -472,7 +436,7 @@ curl -X POST http://localhost:8000/api/ml/train \
 
 **Model not trained yet:**
 ```bash
-# See docs/ML_DETECTION_GUIDE.md for training examples and demo instructions. You can train via API: POST /api/ml/train
+# You can train via API: POST /api/ml/train
 ```
 **High anomaly rate (>20%):**
 - Adjust contamination parameter (lower for stricter detection)
@@ -493,6 +457,3 @@ curl -X POST http://localhost:8000/api/ml/train \
 - **Backwards Compatible:** Root-level imports (e.g., `from detector import detect_threat`) still work thanks to shim files.
 - **Production Ready:** For production use, add authentication, RBAC, comprehensive testing, CI/CD, and audit logging.
 - **ML Production Ready:** Isolation Forest trained, API endpoints integrated, background tasks for async processing, comprehensive documentation provided.
-
-
-

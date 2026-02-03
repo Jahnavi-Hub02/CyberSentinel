@@ -22,7 +22,7 @@ def _load_csv_fallback_cached() -> List[dict]:
     on the hot path.
     """
     project_root = Path(__file__).parent.parent.parent
-    csv_path = project_root / "data" / "cybersecurity_cases_india_combined.csv"
+    csv_path = project_root / "backend" / "data" / "cybersecurity_cases_india_combined.csv"
 
     if not csv_path.exists():
         return []
@@ -184,5 +184,4 @@ async def create_incident(payload: IncidentCreate) -> Incident:
         return serialize_db_incident(doc)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create incident: {str(e)}")
-
 
