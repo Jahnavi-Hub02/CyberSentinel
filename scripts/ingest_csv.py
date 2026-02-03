@@ -8,7 +8,7 @@ from pymongo import MongoClient
 from pathlib import Path
 import hashlib
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = Path(__file__).resolve().parent.parent / "backend" / "data"
 CSV_CANDIDATES = [
     DATA_DIR / "cybersecurity_cases_india_combined.csv",
 ]
@@ -79,7 +79,7 @@ def run(uri: str, dbname: str, drop: bool = False):
             path = c
             break
     if path is None:
-        print('No CSV found to ingest in data/.')
+        print('No CSV found to ingest in backend/data/.')
         return
 
     print(f'Loading CSV: {path}')

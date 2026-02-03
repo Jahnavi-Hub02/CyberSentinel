@@ -26,9 +26,9 @@ def load_preferred_local_dataset() -> pd.DataFrame:
     Converts to canonical frontend columns: id, timestamp, title, description, category, location, amount_lost
     """
     project_root = os.path.dirname(os.path.dirname(__file__))
+    backend_data_dir = os.path.join(project_root, "backend", "data")
     candidates = [
-        os.path.join(project_root, "cybersecurity_cases_india_combined.csv"),
-        os.path.join(project_root, "data", "cybersecurity_cases_india_combined.csv"),
+        os.path.join(backend_data_dir, "cybersecurity_cases_india_combined.csv"),
     ]
     path = None
     for p in candidates:
