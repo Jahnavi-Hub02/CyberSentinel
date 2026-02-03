@@ -8,12 +8,9 @@ from typing import Optional, Tuple, Dict, Any
 import requests
 import pandas as pd
 import streamlit as st
-import folium
-from folium.plugins import MarkerCluster
-from streamlit_folium import st_folium
 import altair as alt
 import plotly.express as px
-import hashlib
+from datetime import datetime, timezone
 
 # ---------------------------
 # Local dataset loader
@@ -26,9 +23,9 @@ def load_preferred_local_dataset() -> pd.DataFrame:
     Converts to canonical frontend columns: id, timestamp, title, description, category, location, amount_lost
     """
     project_root = os.path.dirname(os.path.dirname(__file__))
+    backend_data_dir = os.path.join(project_root, "backend", "data")
     candidates = [
-        os.path.join(project_root, "cybersecurity_cases_india_combined.csv"),
-        os.path.join(project_root, "data", "cybersecurity_cases_india_combined.csv"),
+        os.path.join(backend_data_dir, "cybersecurity_cases_india_combined.csv"),
     ]
     path = None
     for p in candidates:
@@ -341,6 +338,18 @@ def safe_rerun():
             pass
 
 # ---------------------------
+# Backend health status
+# ---------------------------
+@st.cache_data(ttl=30)
+def get_backend_health() -> Tuple[bool, Optional[str]]:
+    """Return (is_online, error_message) based on /health reachability."""
+    try:
+        requests.get(f"{API_URL}/health", timeout=3)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+# ---------------------------
 # Data fetching (tries backend -> fallback to local CSV)
 # ---------------------------
 @st.cache_data(ttl=30)
@@ -551,14 +560,20 @@ def geocode_india_locations(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["lat", "lon"])
     return df
 
-def _deterministic_jitter(uid: str, scale: float = 0.02) -> float:
-    """Deterministic small offset based on an id string to avoid exact overlapping markers."""
+def _format_local_timestamp(value: Optional[object]) -> str:
+    """Convert timestamps to readable local time strings for tooltips."""
+    if value is None or value == "":
+        return "Unknown time"
     try:
-        h = int(hashlib.md5(str(uid).encode()).hexdigest()[:8], 16)
-        val = (h % 10000) / 10000.0  # 0..0.9999
-        return (val - 0.5) * scale
+        ts = pd.to_datetime(value, errors="coerce")
     except Exception:
-        return 0.0
+        return "Unknown time"
+    if pd.isna(ts):
+        return "Unknown time"
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(timezone.utc)
+    local_ts = ts.tz_convert(datetime.now().astimezone().tzinfo)
+    return local_ts.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def render_map(df: pd.DataFrame, selected_id: Optional[str] = None) -> None:
@@ -568,9 +583,9 @@ def render_map(df: pd.DataFrame, selected_id: Optional[str] = None) -> None:
         st.info("No mappable incidents yet. Add incidents with a known Indian city in 'location'.")
         return
 
-    # Sidebar control: limit markers to avoid long render times
+    # Sidebar control: limit markers to the most recent 10–15 incidents
     st.sidebar.caption("Map display options")
-    max_markers = st.sidebar.slider("Max map markers", min_value=50, max_value=2000, value=500, step=50)
+    max_markers = st.sidebar.slider("Max map markers", min_value=10, max_value=15, value=12, step=1)
 
     # Center map on India by default
     center_lat, center_lon = 21.1466, 79.0889
@@ -582,85 +597,60 @@ def render_map(df: pd.DataFrame, selected_id: Optional[str] = None) -> None:
         center_lat, center_lon = float(match["lat"]), float(match["lon"])
         zoom_level = 8
 
-    # Create Folium map with dark tiles (better match dashboard theme)
-    m = folium.Map(
-        location=[center_lat, center_lon],
-        zoom_start=zoom_level,
-        tiles="CartoDB dark_matter",
-        control_scale=True,
-    )
+    # Limit markers for performance and clarity
+    to_show = geo.head(max_markers).copy()
 
-    # Use a MarkerCluster to improve performance and prevent overlap
-    marker_cluster = MarkerCluster(name="Incidents", disableClusteringAtZoom=10).add_to(m)
+    def ensure_column(name: str, default: str) -> None:
+        if name not in to_show.columns:
+            to_show[name] = default
+        to_show[name] = to_show[name].astype(str)
 
-    # Severity configuration
-    severity_color = {
-        "Low": "#FFE600",
-        "Medium": "#FFA500",
-        "High": "#FF6347",
-        "Critical": "#FF0000",
-    }
-
-    severity_radius = {
-        "Low": 8,
-        "Medium": 12,
-        "High": 16,
-        "Critical": 20,
-    }
-
-    # Limit markers for performance
-    to_show = geo.head(max_markers)
-
-    bounds = []
-
-    # Add markers for each incident (clustered)
-    for idx, row in to_show.iterrows():
-        severity = str(row.get("severity", "Medium")).title()
-        color = severity_color.get(severity, "#9999FF")
-        radius = severity_radius.get(severity, 10)
-
-        # Apply a tiny deterministic jitter to avoid overlapping exact coordinates
-        jitter_lat = _deterministic_jitter(row.get("id", idx), scale=0.02)
-        jitter_lon = _deterministic_jitter(f"{row.get('id', idx)}_lon", scale=0.02)
-        lat = float(row["lat"]) + jitter_lat
-        lon = float(row["lon"]) + jitter_lon
-
-        # Build popup (keep compact) and tooltip for quick hover
-        popup_text = f"<div style='font-family: Arial; width: 240px;'>" \
-                    f"<b>{row.get('title', 'Unknown')}</b><br/><small>{row.get('category', 'N/A')}</small><br/>" \
-                    f"<small>{row.get('location', 'N/A')}</small>" \
-                    "</div>"
-        popup = folium.Popup(popup_text, max_width=280)
-        tooltip = str(row.get('title', ''))
-
-        # Use CircleMarker inside the cluster
-        marker = folium.CircleMarker(
-            location=[lat, lon],
-            radius=radius,
-            popup=popup,
-            tooltip=tooltip,
-            color=color,
-            fill=True,
-            fillColor=color,
-            fillOpacity=0.8,
-            weight=1,
-        )
-        marker.add_to(marker_cluster)
-        bounds.append([lat, lon])
-
-    # Fit map to bounds if we have them
-    if bounds:
-        try:
-            m.fit_bounds(bounds, padding=(40, 40))
-        except Exception:
-            pass
-
-    # If dataset is very large, render map in a collapsed expander by default
-    if len(geo) > 1000:
-        with st.expander(f"Live threat map ({len(geo)} incidents) - expand to view (recommended for large datasets)"):
-            st_folium(m, width=None, height=550)
+    ensure_column("severity", "Medium")
+    to_show["severity"] = to_show["severity"].str.title()
+    ensure_column("title", "Unknown")
+    ensure_column("category", "N/A")
+    ensure_column("location", "N/A")
+    if "timestamp" in to_show.columns:
+        to_show["local_time"] = to_show["timestamp"].apply(_format_local_timestamp)
     else:
-        st_folium(m, width=None, height=550)
+        to_show["local_time"] = "Unknown time"
+
+    severity_color = {
+        "Low": "#2ECC71",
+        "Medium": "#F39C12",
+        "High": "#E74C3C",
+        "Critical": "#C0392B",
+    }
+
+    fig = px.scatter_mapbox(
+        to_show,
+        lat="lat",
+        lon="lon",
+        color="severity",
+        color_discrete_map=severity_color,
+        hover_name="title",
+        hover_data={
+            "category": True,
+            "severity": True,
+            "location": True,
+            "local_time": True,
+            "lat": False,
+            "lon": False,
+        },
+        zoom=zoom_level,
+        center={"lat": center_lat, "lon": center_lon},
+        height=550,
+    )
+    fig.update_traces(
+        marker={"size": 10},
+        cluster={"enabled": True, "radius": 50, "maxzoom": 6},
+    )
+    fig.update_layout(
+        mapbox_style="carto-darkmatter",
+        margin={"r": 0, "t": 0, "l": 0, "b": 0},
+        legend_title_text="Severity",
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     with st.expander("Incident details"):
         cols = ["id", "title", "category", "severity", "status", "location", "source", "timestamp"]
@@ -817,6 +807,14 @@ def main() -> None:
         except Exception:
             pass
 
+    # Backend health status indicator
+    backend_online, _health_error = get_backend_health()
+    with st.sidebar:
+        if backend_online:
+            st.success("✅ Backend: Online")
+        else:
+            st.error("❌ Backend: Offline")
+
     # try backend first
     df = fetch_incidents(params)
 
@@ -929,13 +927,10 @@ def main() -> None:
             st.subheader("System Status")
             col1, col2, col3 = st.columns(3)
             with col1:
-                try:
-                    health_resp = requests.get(f"{API_URL}/api/health", timeout=5)
-                    if health_resp.status_code == 200:
-                        st.success("✅ Backend API: Online")
-                    else:
-                        st.error("❌ Backend API: Error")
-                except Exception:
+                backend_online, _health_error = get_backend_health()
+                if backend_online:
+                    st.success("✅ Backend API: Online")
+                else:
                     st.error("❌ Backend API: Offline")
             with col2:
                 try:
