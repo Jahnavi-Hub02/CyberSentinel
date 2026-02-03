@@ -10,4 +10,3 @@ def test_incidents_limit_fallback():
     assert isinstance(data, list)
     # Should be at most 5 items
     assert len(data) <= 5
-

@@ -27,6 +27,7 @@ def _wait_for_health(timeout: int = 20) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
+
             if r.ok:
                 return
         except requests.RequestException:
