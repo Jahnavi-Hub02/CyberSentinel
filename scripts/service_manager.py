@@ -139,7 +139,7 @@ class ServiceManager:
 💡 NEXT STEPS:
    1. Open: http://localhost:8501
    2. Explore the dashboard
-   3. (Optional) see `docs/ML_DETECTION_GUIDE.md` for demo instructions
+   3. (Optional) see `README.md` for ML demo instructions
    
 ⚠️  Keep this terminal open! Services run while terminal is open.
    Press CTRL+C to stop all services.
