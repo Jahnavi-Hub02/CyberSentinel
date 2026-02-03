@@ -66,4 +66,3 @@ def test_incidents_limit_and_enrichment_behavior():
     # one with lat/lon (best-effort — don't fail the whole suite if dataset is tiny)
     if any(e.get("location") for e in expected):
         assert any(
-
