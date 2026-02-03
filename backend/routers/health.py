@@ -3,6 +3,8 @@ from fastapi.responses import JSONResponse
 
 router = APIRouter()
 
+
 @router.get("/health")
-async def health():
-    return JSONResponse({"status": "ok"})
+async def health() -> JSONResponse:
+    """Lightweight health check for load balancers and local scripts."""
+    return JSONResponse({"status": "online"})
