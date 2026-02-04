@@ -14,6 +14,14 @@ docs/** linguist-documentation
 *.svg linguist-generated
 *.ico linguist-generated
 
+# Make sure any shell / batch helpers or misc config are excluded too
+*.bat linguist-generated
+*.cmd linguist-generated
+*.ps1 linguist-generated
+Dockerfile linguist-generated
+Makefile linguist-generated
+.gitignore linguist-generated
+
 .vscode/** linguist-generated
 .github/** linguist-generated
 
