@@ -1,0 +1,19 @@
+*.py linguist-language=Python
+
+# Treat documentation, config, and data as non-code so language stats
+# focus purely on Python source.
+*.md linguist-documentation
+docs/** linguist-documentation
+
+*.yml linguist-documentation
+*.yaml linguist-documentation
+
+*.json linguist-data
+*.csv linguist-data
+
+*.svg linguist-generated
+*.ico linguist-generated
+
+.vscode/** linguist-generated
+.github/** linguist-generated
+
