@@ -1,4 +1,5 @@
-*.py linguist-language=Python
+* linguist-detectable=false
+*.py linguist-detectable=true linguist-language=Python
 
 # Treat documentation, config, and data as non-code so language stats
 # focus purely on Python source.
