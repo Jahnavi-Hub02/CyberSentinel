@@ -550,30 +550,45 @@ def to_lat_lon(loc: str) -> Tuple[Optional[float], Optional[float]]:
     token = loc.split(",")[0].strip().lower()
     return _CITY_COORDS.get(token, (None, None))
 
-@st.cache_data(ttl=60)
 def geocode_india_locations(df: pd.DataFrame) -> pd.DataFrame:
-    """Map human-friendly Indian city names to lat/lon.
-
-    Cached to avoid recomputing on each rerun and improve dashboard responsiveness.
+    """Map incidents to lat/lon: use API coordinates when present, else geocode from location.
+    Not cached so the map always reflects current data.
     """
-    if df.empty or "location" not in df.columns:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    # Require location column (or City as fallback for raw data)
+    loc_col = "location" if "location" in df.columns else ("City" if "City" in df.columns else None)
+    if not loc_col:
         return pd.DataFrame()
     df = df.copy()
-    try:
-        latlon = df["location"].astype(str).apply(lambda s: to_lat_lon(s))
-        df["lat"] = latlon.apply(lambda t: t[0])
-        df["lon"] = latlon.apply(lambda t: t[1])
-    except Exception:
-        df["lat"] = None
-        df["lon"] = None
-    # Drop rows without valid numeric coordinates
-    df = df.dropna(subset=["lat", "lon"])
-    # Ensure numeric types
-    try:
-        df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
-        df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
-    except Exception:
-        pass
+    # Normalize location column name for the rest of the function
+    if loc_col != "location":
+        df["location"] = df[loc_col].astype(str)
+    # Start from API coordinates if present
+    has_lat = False
+    has_lon = False
+    for lat_name in ("lat", "latitude"):
+        if lat_name in df.columns:
+            df["lat"] = pd.to_numeric(df[lat_name], errors="coerce")
+            has_lat = True
+            break
+    if not has_lat:
+        df["lat"] = pd.Series([None] * len(df), dtype=float)
+    for lon_name in ("lon", "longitude"):
+        if lon_name in df.columns:
+            df["lon"] = pd.to_numeric(df[lon_name], errors="coerce")
+            has_lon = True
+            break
+    if not has_lon:
+        df["lon"] = pd.Series([None] * len(df), dtype=float)
+    # Fill missing coordinates by geocoding from location
+    missing = df["lat"].isna() | df["lon"].isna()
+    if missing.any():
+        locs = df.loc[missing, "location"].astype(str).apply(to_lat_lon)
+        df.loc[missing, "lat"] = [t[0] for t in locs]
+        df.loc[missing, "lon"] = [t[1] for t in locs]
+    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
     df = df.dropna(subset=["lat", "lon"])
     return df
 
@@ -600,22 +615,27 @@ def render_map(df: pd.DataFrame, selected_id: Optional[str] = None) -> None:
         st.info("No mappable incidents yet. Add incidents with a known Indian city in 'location'.")
         return
 
-    # Sidebar control: limit markers to the most recent 10–15 incidents
-    st.sidebar.caption("Map display options")
-    max_markers = st.sidebar.slider("Max map markers", min_value=10, max_value=15, value=12, step=1)
+    # Show all mappable incidents on the map (same as Incident details table)
+    to_show = geo.copy()
 
     # Center map on India by default
     center_lat, center_lon = 21.1466, 79.0889
     zoom_level = 4
 
-    # If a specific incident is selected, center on it
-    if selected_id and selected_id in set(geo.get("id", [])):
-        match = geo[geo["id"] == selected_id].iloc[0]
-        center_lat, center_lon = float(match["lat"]), float(match["lon"])
-        zoom_level = 8
+    # Normalize id for comparison (df may have int or str)
+    geo_ids_str = geo["id"].astype(str).tolist() if "id" in geo.columns else []
 
-    # Limit markers for performance and clarity
-    to_show = geo.head(max_markers).copy()
+    # If a specific incident is selected, center map on it
+    if selected_id:
+        selected_id_str = str(selected_id)
+        if selected_id_str in geo_ids_str:
+            match = geo[geo["id"].astype(str) == selected_id_str].iloc[0]
+            center_lat, center_lon = float(match["lat"]), float(match["lon"])
+            zoom_level = 8
+        # Put selected incident last so its marker is drawn on top (hover shows correct incident)
+        if selected_id_str in to_show["id"].astype(str).values:
+            sel_mask = to_show["id"].astype(str) == selected_id_str
+            to_show = pd.concat([to_show[~sel_mask], to_show[sel_mask]], ignore_index=True)
 
     def ensure_column(name: str, default: str) -> None:
         if name not in to_show.columns:
@@ -660,32 +680,38 @@ def render_map(df: pd.DataFrame, selected_id: Optional[str] = None) -> None:
     )
     fig.update_traces(
         marker=dict(
-            size=10,
-            opacity=0.9,
+            size=25,
+            opacity=1.0,
+            sizemin=20,
         ),
         cluster=dict(
-            enabled=True,
-            size=[20, 40, 60],
-            step=50,
-            maxzoom=6,
+            enabled=False,
         ),
     )
     fig.update_layout(
         mapbox_style="carto-darkmatter",
         mapbox=dict(
-            center=dict(lat=22.5937, lon=78.9629),
-            zoom=4,
+            center=dict(lat=center_lat, lon=center_lon),
+            zoom=zoom_level,
         ),
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
         legend_title_text="Severity",
         height=550,
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    # Show zoom in/out and pan in the map toolbar
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "displayModeBar": True,
+            "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+            "scrollZoom": True,
+        },
+    )
 
     with st.expander("Incident details"):
         cols = ["id", "title", "category", "severity", "status", "location", "source", "timestamp"]
-        existing = [c for c in cols if c in geo.columns]
-        # Limit details table for performance
+        existing = [c for c in cols if c in to_show.columns]
         st.dataframe(to_show[existing], use_container_width=True, hide_index=True)
 
 @st.cache_data(ttl=60)
@@ -879,6 +905,8 @@ def main() -> None:
         render_home(df)
     elif page == "Dashboard":
         st.title("Dashboard")
+        # Keep full df for the map so the map always shows all mappable incidents (filters can empty the filtered df)
+        df_for_map = df.copy() if not df.empty else df
         if not df.empty:
             st.session_state["locations_options"] = sorted(df["location"].dropna().astype(str).unique().tolist()) if "location" in df.columns else []
             st.session_state["sources_options"] = sorted(df["source"].dropna().astype(str).unique().tolist()) if "source" in df.columns else []
@@ -892,7 +920,7 @@ def main() -> None:
         col1, col2 = st.columns((2, 1))
         with col1:
             with st.container():
-                render_map(df)
+                render_map(df_for_map)
         with col2:
             st.subheader("Incident Categories")
             render_category_chart(df)
