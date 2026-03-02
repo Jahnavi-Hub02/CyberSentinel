@@ -302,6 +302,15 @@ On success you should see something similar to:
 
 ---
 
+## 📊 Evaluation Results
+
+![Evaluation Dashboard](docs/cybersentinel_evaluation_metrics.png)
+
+Isolation Forest detected 120 anomalies (10%) with:
+- AUC-ROC: 0.3817
+- F1 Score: 0.0600
+- Training Time: ~162ms
+
 ## How It Works (High-Level Flow)
 
 1. **Data ingestion**
